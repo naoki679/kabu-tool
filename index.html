@@ -416,7 +416,7 @@ function splitLine(line){
 }
 function toNum(v){
   if(v==null) return NaN;
-  const s = String(v).replace(/[",，\s　円株%％]/g,"").replace(/[０-９．]/g, c=>"0123456789."["０１２３４５６７８９．".indexOf(c)]);
+  const s = String(v).replace(/[",，\s　円株%％¥￥+＋]/g,"").replace(/[０-９．]/g, c=>"0123456789."["０１２３４５６７８９．".indexOf(c)]);
   if(s===""||s==="-"||s==="--") return NaN;
   return Number(s);
 }
@@ -436,6 +436,11 @@ function parsePaste(text){
       hdr.forEach((h,i)=>{
         for(const [key,re] of COLMAP){ if(map[key]===undefined && re.test(h)){ map[key]=i; break; } }
       });
+      // 楽天CSV：円建ての時価評価額・評価損益から「円建て取得原価（購入時レート込み）」を算出
+      const vj = cells.findIndex(c=>/時価評価額/.test(String(c)) && /円/.test(String(c)));
+      const pj = cells.findIndex(c=>/評価損益/.test(String(c)) && /円/.test(String(c)));
+      if(vj >= 0) map.valJpy = vj;
+      if(pj >= 0) map.plJpy = pj;
       headerFound=true; continue;
     }
     const codeRaw = map ? cells[map.code] : undefined;
@@ -465,6 +470,10 @@ function parsePaste(text){
     };
     if(isNaN(row.acq)) row.acq=0;
     if(isNaN(row.price)) row.price=0;
+    if(map.valJpy !== undefined && map.plJpy !== undefined){
+      const vJ = toNum(cells[map.valJpy]), pJ = toNum(cells[map.plJpy]);
+      if(!isNaN(vJ) && !isNaN(pJ)) row.costJpy = vJ - pJ;   // 円建て取得原価（楽天の購入時レート基準）
+    }
     rows.push(row);
   }
   return {rows, headerFound};
@@ -478,15 +487,16 @@ function consolidate(rows){
     const key = r.code+"|"+r.qty+"|"+r.acq+"|"+r.nisa;
     if(seen.has(key)) continue;
     seen.add(key);
-    if(!byCode[r.code]) byCode[r.code] = {code:r.code, name:r.name, qty:0, buy:0, price:r.price, nisaQty:0};
+    if(!byCode[r.code]) byCode[r.code] = {code:r.code, name:r.name, qty:0, buy:0, price:r.price, nisaQty:0, costJpy:0, costJpyOk:true};
     const t = byCode[r.code];
     t.qty += r.qty;
     t.buy += r.qty * r.acq;
+    if(r.costJpy != null && !isNaN(r.costJpy)) t.costJpy += r.costJpy; else t.costJpyOk = false;
     if(r.price>0) t.price = r.price;
     if(r.name) t.name = r.name;
     if(r.nisa) t.nisaQty += r.qty;
   }
-  return Object.values(byCode).map(t=>({code:t.code, name:t.name, qty:t.qty, acq: t.qty>0 ? +(t.buy/t.qty).toFixed(4):0, price:t.price, nisaQty:t.nisaQty}));
+  return Object.values(byCode).map(t=>({code:t.code, name:t.name, qty:t.qty, acq: t.qty>0 ? +(t.buy/t.qty).toFixed(4):0, price:t.price, nisaQty:t.nisaQty, costJpy: t.costJpyOk ? +t.costJpy.toFixed(0) : null}));
 }
 
 /* ============ 集計 ============ */
@@ -495,11 +505,12 @@ function mergedHoldings(){
   for(const b of ["sbi","rakuten","other"]) state.brokers[b].forEach(h=>all.push({...h, _b:b}));
   const byCode = {};
   for(const h of all){
-    if(!byCode[h.code]) byCode[h.code] = {code:h.code, name:h.name||"", qty:0, buy:0, price:h.price||0, nisaQty:0, src:{}};
+    if(!byCode[h.code]) byCode[h.code] = {code:h.code, name:h.name||"", qty:0, buy:0, price:h.price||0, nisaQty:0, src:{}, costJpy:0, costJpyOk:true};
     const t = byCode[h.code];
     t.src[h._b] = true;
     t.qty += (h.qty||0);
     t.buy += (h.qty||0)*(h.acq||0);
+    if(h.costJpy != null) t.costJpy += h.costJpy; else t.costJpyOk = false;
     if(h.price>0) t.price = h.price;
     if(h.name) t.name = h.name;
     t.nisaQty += (h.nisaQty||0);
@@ -518,7 +529,7 @@ function computeRows(){
     const isUS = /^[A-Z]/.test(h.code);
     const mult = isUS ? fx : 1;   // 米国株はドル→円換算（単価表示はドルのまま）
     const acq = h.qty>0 ? h.buy/h.qty : 0;
-    const buy = h.buy * mult;
+    const buy = (h.costJpyOk && h.costJpy) ? h.costJpy : h.buy * mult;   // 楽天CSVの円建て取得原価を優先（購入時レート基準）
     const val = h.qty * h.price * mult;
     const pl = val - buy;
     const nisaQty = Math.min(h.qty, (h.nisaQty>0 ? h.nisaQty : (m.nisaManual||0)));
