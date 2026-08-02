@@ -153,6 +153,9 @@ footer{padding:14px 22px; font-size:11px; color:var(--sub); text-align:center; l
 .sigbdg{display:inline-block; font-size:11px; font-weight:700; border-radius:5px; padding:2px 9px; margin-left:4px; vertical-align:middle; background:#eef1f7; color:var(--sub);}
 .sigbdg.on{background:#e8f1ff; color:#1256c4; border:1px solid #bcd4f5;}
 .sigbdg.star{background:var(--gold); color:#fff;}
+.favbtn{background:none; border:none; cursor:pointer; font-size:16px; color:#c9ccd6; padding:0 2px; vertical-align:middle;}
+.favbtn.on{color:var(--gold);}
+.favbtn:hover{color:var(--gold);}
 @media(max-width:900px){.mgrid{grid-template-columns:repeat(5,1fr);}}
 
 </style>
@@ -338,13 +341,15 @@ footer{padding:14px 22px; font-size:11px; color:var(--sub); text-align:center; l
       <select id="anaMinScore" onchange="anaSetFilter()"><option value="0">指定なし</option><option value="8">8点</option><option value="10">10点</option><option value="12">12点</option><option value="14">14点</option><option value="16">16点</option></select>以上
       　利回り <input type="number" step="0.1" min="0" class="w60" id="anaMinYield" onchange="anaSetFilter()"> ％以上
       　<label style="cursor:pointer"><input type="checkbox" id="anaNoX" onchange="anaSetFilter()"> 指標に×なしのみ</label>
+      　<label style="cursor:pointer"><input type="checkbox" id="anaFavOnly" onchange="anaSetFilter()"> <span style="color:var(--gold);font-weight:700">★</span>お気に入りのみ</label>
       　<label style="cursor:pointer"><input type="checkbox" id="anaHideX" onchange="anaSetFilter()"> ×除外を隠す</label>
+      　<button class="btn ghost" style="padding:3px 12px;margin:0;font-size:12px" onclick="anaFavDisplayed()" title="現在の絞り込みで表示中の銘柄をまとめてお気に入り登録">表示中を★登録</button>
       　<button class="btn ghost" style="padding:3px 12px;margin:0;font-size:12px" onclick="anaResetFilter()">解除</button>
       　<span id="anaCount" class="note" style="margin:0"></span>
     </div>
     <div class="tblwrap" style="max-height:52vh">
       <table id="anaTable">
-        <thead><tr><th data-ak="code" title="クリックでソート">コード</th><th>銘柄名</th><th>判定</th><th data-ak="score" title="クリックでソート">スコア</th><th>売上</th><th>営利率</th><th>EPS</th><th>営業CF</th><th>一株配当</th><th>配当性向</th><th>自己資本</th><th>現金等</th><th data-ak="yield" title="クリックでソート">利回り</th><th>取得日</th><th>リンク</th><th>操作</th></tr></thead>
+        <thead><tr><th title="お気に入り">★</th><th data-ak="code" title="クリックでソート">コード</th><th>銘柄名</th><th>判定</th><th data-ak="score" title="クリックでソート">スコア</th><th>売上</th><th>営利率</th><th>EPS</th><th>営業CF</th><th>一株配当</th><th>配当性向</th><th>自己資本</th><th>現金等</th><th data-ak="yield" title="クリックでソート">利回り</th><th>取得日</th><th>リンク</th><th>操作</th></tr></thead>
         <tbody id="anaTbody"></tbody>
       </table>
     </div>
@@ -382,7 +387,7 @@ function load(){
   }catch(e){ state = defaultState(); }
   if(!state.settings.sectorClass) state.settings.sectorClass = {...DEFAULT_SECTOR_CLASS};
   if(!state.analysis) state.analysis = { list: [] };
-  if(!state.analysis.filter) state.analysis.filter = { minScore:0, minYield:null, hideX:false, noX:false, sort:"added", asc:false, v2:true };
+  if(!state.analysis.filter) state.analysis.filter = { minScore:0, minYield:null, hideX:false, noX:false, favOnly:false, sort:"added", asc:false, v2:true };
   if(!state.analysis.filter.v2){ state.analysis.filter.minScore = 0; state.analysis.filter.noX = false; state.analysis.filter.v2 = true; }
   if(state.analysis.list) state.analysis.list.forEach(c=>{ if(c.years) anaFillComputed(c.years); });
 }
@@ -1288,11 +1293,12 @@ async function anaFetchHtml(url){
       const timer = setTimeout(()=>ctrl.abort(), 20000);
       const r = await fetch(ANA_PROXIES[k](url), {signal: ctrl.signal});
       clearTimeout(timer);
+      if(r.status === 404) throw new Error("NOT_FOUND");   // ページ自体が無い（上場直後など）
       if(!r.ok){ lastErr = new Error("HTTP "+r.status); continue; }
       const t = await r.text();
       if(t && t.length > 3000 && /irbank/i.test(t)) return t;
       lastErr = new Error("応答が不正");
-    }catch(e){ lastErr = e; }
+    }catch(e){ if(e && e.message === "NOT_FOUND") throw e; lastErr = e; }
   }
   throw (lastErr || new Error("取得失敗"));
 }
@@ -1394,6 +1400,7 @@ async function anaFetchJsonFile(code){
       const timer = setTimeout(()=>ctrl.abort(), 15000);
       const r = await fetch(p(url), {signal: ctrl.signal});
       clearTimeout(timer);
+      if(r.status === 404){ lastErr = new Error("NOT_FOUND"); continue; }
       if(!r.ok){ lastErr = new Error("HTTP " + r.status); continue; }
       const j = await r.json();
       if(j && j["業績"]) return j;
@@ -1579,9 +1586,30 @@ async function anaFetchOne(code){
     years = r.years; name = r.name;
   }catch(e){
     // HTML経路が全滅 → 公式JSON（直近約4年）にフォールバック
-    const j = await anaFetchJsonFile(code);
-    years = anaJsonToYears(j);
-    viaJson = true;
+    try{
+      const j = await anaFetchJsonFile(code);
+      years = anaJsonToYears(j);
+      viaJson = true;
+    }catch(e2){
+      const m1 = String(e && e.message || ""), m2 = String(e2 && e2.message || "");
+      if(m1 === "NOT_FOUND" || m2 === "NOT_FOUND") throw new Error("NODATA");
+      // 中継経由では404が見えないことがある → 銘柄トップページで「決算まとめ」リンクの有無を確認
+      let top = null;
+      try{ top = await anaFetchHtml("https://irbank.net/" + encodeURIComponent(code)); }catch(e3){}
+      if(!top) throw e2;
+      const em = top.match(/\/(E\d+)\/results/);
+      if(!em) throw new Error("NODATA");   // 決算まとめページ自体が無い（上場直後など）
+      const html2 = await anaFetchHtml("https://irbank.net/" + em[1] + "/results");
+      const r2 = anaParseIrbank(html2, code);
+      if(r2.years.some(y=>y.dps == null)){
+        try{
+          const dh = await anaFetchHtml("https://irbank.net/" + em[1] + "/dividend");
+          const dmap = anaParseDividendPage(dh);
+          r2.years.forEach(y=>{ if(y.dps == null && dmap[y.y] != null) y.dps = dmap[y.y]; });
+        }catch(e4){}
+      }
+      years = r2.years; name = r2.name;
+    }
   }
   if(viaJson && c.years && c.years.length){
     c.years = anaMergeYears(c.years, years);   // 既存10年に直近を上書き
@@ -1600,7 +1628,7 @@ async function anaFetchOne(code){
 let anaBusy = false;
 async function anaFetchAll(force){
   if(anaBusy) return;
-  const targets = anaList().filter(c=>force || !c.years || !c.name).map(c=>c.code);
+  const targets = anaList().filter(c=>force || ((!c.years || !c.name) && c.error !== "NODATA")).map(c=>c.code);
   if(!targets.length){ anaMsgShow("取得対象がありません（全銘柄取得済み）"); return; }
   anaBusy = true;
   const btn = document.getElementById("anaFetchAllBtn");
@@ -1608,7 +1636,11 @@ async function anaFetchAll(force){
   for(let i = 0; i < targets.length; i++){
     btn.textContent = "取得中… " + (i+1) + "/" + targets.length;
     try{ await anaFetchOne(targets[i]); ok++; }
-    catch(e){ fails.push(targets[i]); const c = anaFind(targets[i]); if(c) c.error = String(e && e.message || e); }
+    catch(e){
+      const em = String(e && e.message || e);
+      const c = anaFind(targets[i]); if(c) c.error = em;
+      if(em !== "NODATA") fails.push(targets[i]);   // 未掲載銘柄は再試行しない
+    }
     renderAnalysis();
     if(i < targets.length - 1) await new Promise(r=>setTimeout(r, 1200));
   }
@@ -1620,7 +1652,11 @@ async function anaFetchAll(force){
     for(let i = 0; i < retry.length; i++){
       btn.textContent = "再試行中… " + (i+1) + "/" + retry.length;
       try{ await anaFetchOne(retry[i]); ok++; }
-      catch(e){ fails.push(retry[i]); const c = anaFind(retry[i]); if(c) c.error = String(e && e.message || e); }
+      catch(e){
+        const em = String(e && e.message || e);
+        const c = anaFind(retry[i]); if(c) c.error = em;
+        if(em !== "NODATA") fails.push(retry[i]);
+      }
       renderAnalysis();
       if(i < retry.length - 1) await new Promise(r=>setTimeout(r, 2000));
     }
@@ -1635,7 +1671,14 @@ async function anaRefetch(code){
   if(anaBusy) return;
   anaBusy = true;
   try{ await anaFetchOne(code); anaMsgShow(code + " を再取得しました"); }
-  catch(e){ anaMsgShow(code + " の取得に失敗：" + (e && e.message || e), "err"); }
+  catch(e){
+    const em = String(e && e.message || e);
+    const c = anaFind(code); if(c) c.error = em;
+    save();
+    anaMsgShow(em === "NODATA"
+      ? code + "：IR BANKに決算まとめページがまだありません（上場直後の銘柄など）。分析対象外です"
+      : code + " の取得に失敗：" + em, "err");
+  }
   anaBusy = false;
   renderAnalysis();
 }
@@ -1647,6 +1690,18 @@ function anaDelete(code){
   save(); renderAnalysis();
 }
 function anaSetVerdict(code, v){ const c = anaFind(code); if(c){ c.verdict = v; save(); renderAnalysis(); } }
+let anaShownCodes = [];
+function anaToggleFav(code){
+  const c = anaFind(code);
+  if(c){ c.fav = !c.fav; save(); renderAnalysis(); }
+}
+function anaFavDisplayed(){
+  if(!anaShownCodes.length){ anaMsgShow("表示中の銘柄がありません", "err"); return; }
+  let n = 0;
+  anaShownCodes.forEach(code=>{ const c = anaFind(code); if(c && !c.fav){ c.fav = true; n++; } });
+  save(); renderAnalysis();
+  anaMsgShow("表示中の " + anaShownCodes.length + " 銘柄をお気に入りに登録しました（新規 " + n + " 件）。「★お気に入りのみ」で呼び出せます。");
+}
 function anaSetNote(code, v){ const c = anaFind(code); if(c){ c.note = v; save(); } }
 let anaSelected = null;
 function anaShowDetail(code){
@@ -1682,11 +1737,12 @@ function anaScore(c){
 function renderAnalysis(skipDetail){
   const tb = document.getElementById("anaTbody");
   if(!tb) return;
-  const f = state.analysis.filter || { minScore:0, minYield:null, hideX:false, noX:false, sort:"added", asc:false, v2:true };
+  const f = state.analysis.filter || { minScore:0, minYield:null, hideX:false, noX:false, favOnly:false, sort:"added", asc:false, v2:true };
   let rows = anaList().map(c=>({ c, sc: anaScore(c) }));
   const anaTotal = rows.length;
   rows = rows.filter(r=>{
     if(f.hideX && r.c.verdict === "×") return false;
+    if(f.favOnly && !r.c.fav) return false;
     if(f.minScore > 0 && (!r.sc || r.sc.insufficient || r.sc.pass < f.minScore)) return false;
     if(f.noX && (!r.sc || r.sc.insufficient || r.sc.bad > 0)) return false;
     if(f.minYield != null && !(r.c.yield != null && r.c.yield >= f.minYield)) return false;
@@ -1707,8 +1763,10 @@ function renderAnalysis(skipDetail){
   const anaCnt = document.getElementById("anaCount");
   if(anaCnt){
     const sortName = f.sort === "score" ? "・スコア" + (f.asc?"昇順":"降順") : f.sort === "yield" ? "・利回り" + (f.asc?"昇順":"降順") : f.sort === "code" ? "・コード" + (f.asc?"昇順":"降順") : "";
-    anaCnt.textContent = "表示 " + rows.length + " / 全 " + anaTotal + " 件" + sortName;
+    const favN = anaList().filter(x=>x.fav).length;
+    anaCnt.textContent = "表示 " + rows.length + " / 全 " + anaTotal + " 件" + (favN ? "　★" + favN + "件" : "") + sortName;
   }
+  anaShownCodes = rows.map(r=>r.c.code);
   tb.innerHTML = rows.map(({ c, sc })=>{
     const vcls = c.verdict === "◎" ? "v-good" : (c.verdict === "×" ? "v-bad" : "");
     const marks = ANA_METRICS.map(m=>{
@@ -1718,8 +1776,9 @@ function renderAnalysis(skipDetail){
     }).join("");
     const opts = ["","◎","○","×"].map(v=>'<option value="'+v+'"'+(c.verdict===v?" selected":"")+'>'+(v===""?"—":v)+'</option>').join("");
     return '<tr class="'+vcls+'">' +
+      '<td><button class="favbtn'+(c.fav?" on":"")+'" title="お気に入りに'+(c.fav?"登録済み（クリックで解除）":"登録")+'" onclick="anaToggleFav(\''+c.code+'\')">'+(c.fav?"★":"☆")+'</button></td>' +
       '<td>'+anaEsc(c.code)+'</td>' +
-      '<td class="lft">'+anaSigStar(c)+(c.name ? anaEsc(c.name) : (c.error ? '<span class="ana-ng" title="'+anaEsc(c.error)+'">取得失敗</span>' : '<span class="ana-na">未取得</span>'))+'</td>' +
+      '<td class="lft">'+anaSigStar(c)+(c.name ? anaEsc(c.name) : (c.error === "NODATA" ? '<span class="ana-na" title="IR BANKに決算まとめページがありません（上場直後の銘柄など）。有価証券報告書の提出後に↻で再取得すると取れる場合があります">データ未掲載</span>' : c.error ? '<span class="ana-ng" title="'+anaEsc(c.error)+'">取得失敗</span>' : '<span class="ana-na">未取得</span>'))+'</td>' +
       '<td><select onchange="anaSetVerdict(\''+c.code+'\',this.value)">'+opts+'</select></td>' +
       (sc && sc.insufficient
         ? '<td class="anaScore"><span class="ana-bad" title="決算データが' + sc.ny + '年分しかありません（10年未満）">投資不可</span></td>'
@@ -1732,7 +1791,7 @@ function renderAnalysis(skipDetail){
       '<button class="btn ghost" style="padding:2px 8px;margin:0;font-size:12px" title="再取得" onclick="anaRefetch(\''+c.code+'\')">↻</button> ' +
       '<button class="delbtn" onclick="anaDelete(\''+c.code+'\')">✕</button></td>' +
       '</tr>';
-  }).join("") || '<tr><td colspan="16" style="text-align:center;color:var(--sub);padding:18px">候補銘柄がまだありません。上でコードを追加してください。</td></tr>';
+  }).join("") || '<tr><td colspan="17" style="text-align:center;color:var(--sub);padding:18px">候補銘柄がまだありません。上でコードを追加してください。</td></tr>';
   if(!skipDetail) renderAnaDetail();
 }
 function renderAnaDetail(){
@@ -1747,7 +1806,7 @@ function renderAnaDetail(){
   const sc = anaScore(c);
   let html = '<div class="panel" style="margin-bottom:10px"><h3>詳細分析：' + anaEsc(c.code) + '　' + anaEsc(c.name) +
     '　' + (sc.insufficient ? '<span class="ana-bad">投資不可（決算データ' + sc.ny + '年分のみ・10年未満）</span>　' : '') + '<span class="crit">スコア ' + sc.pass + '/' + sc.max + '点（◎' + sc.good + '　○' + sc.mid + '　×' + sc.bad + '）' + (c.yield != null ? '　配当利回り ' + c.yield + '%（スクリーナー時点）' : '') + '　（データ：IR BANK　' + anaEsc(c.fetchedAt || "") + '取得）</span></h3>' +
-    '<div class="settingrow">判定：<select class="verdictSel" onchange="anaSetVerdict(\''+c.code+'\',this.value)">' +
+    '<div class="settingrow"><button class="favbtn'+(c.fav?" on":"")+'" style="font-size:20px" title="お気に入り" onclick="anaToggleFav(\''+c.code+'\')">'+(c.fav?"★":"☆")+'</button>　判定：<select class="verdictSel" onchange="anaSetVerdict(\''+c.code+'\',this.value)">' +
     ["","◎","○","×"].map(v=>'<option value="'+v+'"'+(c.verdict===v?" selected":"")+'>'+(v===""?"—":v+(v==="◎"?" 検討":v==="○"?" 保留":" 除外"))+'</option>').join("") +
     '</select>　メモ：<input type="text" style="flex:1;min-width:200px" value="'+anaEsc(c.note)+'" onchange="anaSetNote(\''+c.code+'\',this.value)" placeholder="気づいたことをメモ（自動保存）">' +
     '　<a class="ext" href="https://irbank.net/'+c.code+'/results" target="_blank">IR BANK</a>　<a class="ext" href="https://finance.yahoo.co.jp/quote/'+c.code+'.T" target="_blank">Yahoo!ファイナンス</a></div></div>';
@@ -1994,10 +2053,11 @@ function anaSetFilter(){
   f.minYield = my === "" ? null : Number(my);
   f.hideX = document.getElementById("anaHideX").checked;
   f.noX = document.getElementById("anaNoX").checked;
+  f.favOnly = document.getElementById("anaFavOnly").checked;
   save(); renderAnalysis();
 }
 function anaResetFilter(){
-  state.analysis.filter = { minScore:0, minYield:null, hideX:false, noX:false, sort:"added", asc:false, v2:true };
+  state.analysis.filter = { minScore:0, minYield:null, hideX:false, noX:false, favOnly:false, sort:"added", asc:false, v2:true };
   anaSyncFilterUi(); save(); renderAnalysis();
 }
 function anaSyncFilterUi(){
@@ -2006,6 +2066,7 @@ function anaSyncFilterUi(){
   const y = document.getElementById("anaMinYield"); if(y) y.value = f.minYield == null ? "" : f.minYield;
   const x = document.getElementById("anaHideX"); if(x) x.checked = !!f.hideX;
   const nx = document.getElementById("anaNoX"); if(nx) nx.checked = !!f.noX;
+  const fo = document.getElementById("anaFavOnly"); if(fo) fo.checked = !!f.favOnly;
 }
 function anaSort(k){
   const f = state.analysis.filter;
