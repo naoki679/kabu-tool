@@ -327,7 +327,7 @@ footer{padding:14px 22px; font-size:11px; color:var(--sub); text-align:center; l
     <h3>候補銘柄の登録</h3>
     <div class="note">楽天スーパースクリーナー等で絞り込んだ銘柄を登録すると、IR BANKから約10年分の業績・配当・財務データを自動取得して分析します。</div>
     <div class="settingrow">
-      <input type="text" id="anaCodeInput" placeholder="銘柄コード（例：9986）" class="w90" onkeydown="if(event.key==='Enter')anaAddCode()">
+      <input type="text" id="anaCodeInput" placeholder="4桁コード 例:9986" class="w90" onkeydown="if(event.key==='Enter')anaAddCode()">
       <button class="btn" onclick="anaAddCode()">追加して取得</button>
     </div>
     <textarea id="anaPaste" style="min-height:64px" placeholder="複数まとめて追加：ここに銘柄コードを含むテキストを貼り付け（スクリーナー結果の表をそのまま貼ってもOK。4桁コードだけ自動抽出します）"></textarea>
@@ -438,6 +438,9 @@ function isCode(v){
 }
 function parsePaste(text){
   const lines = text.replace(/\r/g,"").split("\n").filter(l=>l.trim()!=="");
+  // 保有一覧ではなくスクリーナーの結果CSVが入れられた場合を見分ける
+  const head = lines.slice(0, 3).join(",");
+  const looksScreener = /配当利回り|ROE|自己資本比率|流動比率/.test(head) && !/(保有株数|保有数量|保有数|株数|数量|口数)/.test(head);
   let map=null, rows=[], nisaBlock=false, headerFound=false;
   for(const line of lines){
     const cells = splitLine(line);
@@ -488,7 +491,7 @@ function parsePaste(text){
     }
     rows.push(row);
   }
-  return {rows, headerFound};
+  return {rows, headerFound, looksScreener};
 }
 /* 同一コードを合算（特定+NISA等） */
 function consolidate(rows){
@@ -610,12 +613,14 @@ function plClass(n){ return n>0?"pos":(n<0?"neg":""); }
 
 /* ============ 取込 ============ */
 function finishImport(broker, parsed, msg, sourceLabel){
-  const {rows, headerFound} = parsed;
+  const {rows, headerFound, looksScreener} = parsed;
   if(rows.length===0){
     msg.className="msg err";
-    msg.textContent = headerFound
-      ? "見出し行は見つかりましたが、銘柄の行を読み取れませんでした。表全体（見出し＋データ行）が含まれているか確認してください。"
-      : "見出し行（銘柄コード・保有株数 など）が見つかりません。表の見出しを含めてください。";
+    msg.textContent = looksScreener
+      ? "これは保有一覧ではなく、スクリーナーの結果CSV（配当利回り等）のようです。画面上部の「分析ツール」に切り替えて、候補銘柄の登録欄にドラッグ＆ドロップしてください。"
+      : headerFound
+        ? "見出し行は見つかりましたが、銘柄の行を読み取れませんでした。表全体（見出し＋データ行）が含まれているか確認してください。"
+        : "見出し行（銘柄コード・保有株数 など）が見つかりません。表の見出しを含めてください。";
     return false;
   }
   const cons = consolidate(rows);
@@ -694,6 +699,12 @@ async function fetchAllPrices(auto){
   if(pxBusy) return;
   pxBusy = true;
   const btn = document.getElementById("btnPxAll");
+  const otherP = netOtherBusy("px");
+  if(otherP){
+    const el = document.getElementById("pxAtInfo");
+    if(el && !auto) el.textContent = otherP + "が進行中です。完了後にお試しください";
+    pxBusy = false; return;
+  }
   const codes = [];
   ["sbi","rakuten","other"].forEach(b=>(state.brokers[b]||[]).forEach(h=>{ if(h.code && !codes.includes(h.code)) codes.push(h.code); }));
   let ok = 0, ng = 0;
@@ -792,6 +803,13 @@ function updateMasterRow(code){
   });
 }
 let fetchBusy = false;
+/* 一括取得どうしが同時に走ると中継サーバーのレート制限に掛かるため、片方だけ動かす */
+function netOtherBusy(mine){
+  if(mine !== "div" && fetchBusy) return "配当の自動取得";
+  if(mine !== "px"  && pxBusy)    return "株価の自動更新";
+  if(mine !== "ana" && anaBusy)   return "分析データの取得";
+  return null;
+}
 let lastFailedCodes = [];
 async function fetchCodes(codes){
   if(fetchBusy || codes.length === 0) return;
@@ -800,6 +818,8 @@ async function fetchCodes(codes){
   const prog = document.getElementById("fetchProgress");
   const hdr = document.getElementById("divStatus");
   if(btn) btn.disabled = true;
+  const otherD = netOtherBusy("div");
+  if(otherD){ prog.textContent = otherD + "が進行中のため中止しました。完了後にお試しください"; if(btn) btn.disabled = false; fetchBusy = false; return; }
   let ok = 0, noDiv = [];
   async function pass(list, delayMs, label){
     const failed = [];
@@ -1562,8 +1582,15 @@ function anaAdd(codes){
 }
 function anaAddCode(){
   const el = document.getElementById("anaCodeInput");
-  const codes = anaExtractCodes(el.value);
-  if(!codes.length){ anaMsgShow("銘柄コードが読み取れませんでした", "err"); return; }
+  const raw = String(el.value || "").trim().toUpperCase();
+  const codes = anaExtractCodes(raw);
+  if(!codes.length){
+    anaMsgShow(/^[0-9A-Z]{1,3}$/.test(raw)
+      ? "「" + raw + "」は文字数が足りません。銘柄コードは4桁で入力してください（例：9986、130A）"
+      : raw === "" ? "銘柄コードを入力してください（例：9986）"
+      : "「" + raw + "」から銘柄コードを読み取れませんでした。4桁の証券コードを入力してください（例：9986、130A）", "err");
+    return;
+  }
   anaAdd(codes);
   el.value = "";
   anaFetchAll(false);
@@ -1639,6 +1666,8 @@ async function anaFetchAll(force){
   if(!targets.length){ anaMsgShow("取得対象がありません（全銘柄取得済み）"); return; }
   anaBusy = true;
   const btn = document.getElementById("anaFetchAllBtn");
+  const otherA = netOtherBusy("ana");
+  if(otherA){ anaMsgShow(otherA + "が進行中です。ヘッダーの進捗が消えてから実行してください（同時取得はエラーの原因になります）", "err"); anaBusy = false; return; }
   let ok = 0, fails = [];
   for(let i = 0; i < targets.length; i++){
     btn.textContent = "取得中… " + (i+1) + "/" + targets.length;
@@ -1671,20 +1700,29 @@ async function anaFetchAll(force){
   anaBusy = false;
   btn.textContent = "未取得分を一括取得";
   const ng = fails.length;
-  anaMsgShow(ng ? "取得完了：成功 " + ok + "件／失敗 " + ng + "件（" + fails.join(", ") + "）。数分おいてもう一度お試しください" : "取得完了：" + ok + "件", ng ? "err" : "ok");
+  anaMsgShow(ng
+    ? (ok === 0
+        ? "取得できませんでした（" + ng + "件）。IR BANKまたは中継サーバーが混雑・アクセス制限中の可能性が高いです。他の自動取得（配当・株価）が終わってから、5〜10分ほどおいて再実行してください"
+        : "取得完了：成功 " + ok + "件／失敗 " + ng + "件（" + fails.join(", ") + "）。数分おいてもう一度お試しください")
+    : "取得完了：" + ok + "件", ng ? "err" : "ok");
   renderAnalysis();
 }
 async function anaRefetch(code){
   if(anaBusy) return;
   anaBusy = true;
+  const otherR = netOtherBusy("ana");
+  if(otherR){ anaMsgShow(otherR + "が進行中です。完了後にお試しください", "err"); anaBusy = false; return; }
   try{ await anaFetchOne(code); anaMsgShow(code + " を再取得しました"); }
   catch(e){
     const em = String(e && e.message || e);
     const c = anaFind(code); if(c) c.error = em;
     save();
+    const rate = /Failed to fetch|aborted|NetworkError|HTTP (429|403|5\d\d)/i.test(em);
     anaMsgShow(em === "NODATA"
       ? code + "：IR BANKに決算まとめページがまだありません（上場直後の銘柄など）。分析対象外です"
-      : code + " の取得に失敗：" + em, "err");
+      : rate
+        ? code + " の取得に失敗：混雑またはアクセス制限中のようです（" + em + "）。5〜10分おいて再度お試しください"
+        : code + " の取得に失敗：" + em, "err");
   }
   anaBusy = false;
   renderAnalysis();
@@ -1991,6 +2029,8 @@ async function anaCheckAllSignals(){
   if(anaBusy) return;
   anaBusy = true;
   const btn = document.getElementById("anaSigAllBtn");
+  const otherS = netOtherBusy("ana");
+  if(otherS){ anaMsgShow(otherS + "が進行中です。完了後にお試しください", "err"); anaBusy = false; return; }
   const codes = anaList().filter(c=>c.years).map(c=>c.code);
   let hit = 0, ng = 0;
   for(let i = 0; i < codes.length; i++){
@@ -2050,7 +2090,10 @@ function anaImportCsvText(text){
     return;
   }
   save(); renderAnalysis();
-  anaMsgShow("CSV取込完了：新規 " + added + " 件／既存更新 " + updated + " 件（全 " + found + " 件）。「未取得分を一括取得」を押すと分析データを取得します。");
+  const noYield = (map.yield === undefined || map.yield < 0);
+  anaMsgShow("CSV取込完了：新規 " + added + " 件／既存更新 " + updated + " 件（全 " + found + " 件）。"
+    + (noYield ? "配当利回りの列がないCSVのため利回りは空欄です（保有一覧のCSVの可能性があります）。" : "")
+    + "「未取得分を一括取得」を押すと分析データを取得します。");
 }
 /* ---- 絞り込み・ソート ---- */
 function anaSetFilter(){
@@ -2147,7 +2190,13 @@ if(typeof document !== "undefined"){
   updateFxInfo();
   updatePxInfo();
   setInterval(()=>fetchUsdJpy(), 600000);   // 10分ごとに為替を自動更新
-  setTimeout(()=>fetchAllPrices(true), 3000);   // 起動時に株価を自動更新
+  // 起動時の株価更新：配当・業種の自動取得が終わってから（同時取得はレート制限の原因）
+  (function schedulePx(tries){
+    setTimeout(()=>{
+      if(fetchBusy || anaBusy){ if(tries < 120) schedulePx(tries + 1); return; }
+      fetchAllPrices(true);
+    }, 3000);
+  })(0);
   setTimeout(async ()=>{
     fetchUsdJpy();
     try{ await fillSectors(null, false); }catch(e){}
